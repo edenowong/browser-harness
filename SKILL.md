@@ -69,6 +69,7 @@ If you start struggling with a specific mechanic while navigating, look in inter
 - network-requests.md
 - print-as-pdf.md
 - profile-sync.md
+- react-controlled-inputs.md
 - screenshots.md
 - scrolling.md
 - shadow-dom.md
