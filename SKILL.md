@@ -113,6 +113,7 @@ If you start struggling with a specific mechanic while navigating, look in inter
 - Use screenshots to drive exploration. They are often the fastest way to find the next click target, notice hidden blockers, and decide if a selector is even worth writing.
 - Prefer compositor-level actions over framework hacks. Try screenshots, coordinate clicks, and raw key input before adding DOM-specific workarounds.
 - If you need framework-specific DOM tricks, check interaction-skills/ first. That is where dropdown, dialog, iframe, shadow DOM, and form-specific guidance belongs.
+- Tabs the harness opens (`new_tab`) auto-close on daemon idle (default 15 min, `BH_IDLE_TIMEOUT` seconds, 0 disables) and on `--reload`/stop, so they don't pile up and exhaust memory. Only harness-created tabs close; the user's own tabs are never touched. Call `--reload` when done to clean up immediately.
 
 ## Domain skills (opt-in)
 

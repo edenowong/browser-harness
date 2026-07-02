@@ -341,6 +341,10 @@ def new_tab(url="about:blank"):
     # attach, so the brief about:blank is "complete" by the time the caller
     # polls and wait_for_load() returns before navigation actually starts.
     tid = cdp("Target.createTarget", url="about:blank")["targetId"]
+    # Tell the daemon we own this tab so it can close it on idle/shutdown.
+    # Only harness-created tabs are tracked; the user's own tabs are never touched.
+    try: _send({"meta": "register_tab", "target_id": tid})
+    except Exception: pass
     switch_tab(tid)
     if url != "about:blank":
         goto_url(url)

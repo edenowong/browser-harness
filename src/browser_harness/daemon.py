@@ -67,6 +67,10 @@ INTERNAL = ("chrome://", "chrome-untrusted://", "devtools://", "chrome-extension
 BU_API = "https://api.browser-use.com/api/v3"
 REMOTE_ID = os.environ.get("BU_BROWSER_ID")
 API_KEY = os.environ.get("BROWSER_USE_API_KEY")
+# Auto-shutdown after this many seconds with no client request, closing any
+# harness-created tabs so they don't pile up in the user's Chrome and exhaust
+# memory. 0 disables the idle timer (shutdown-time cleanup still runs).
+IDLE_TIMEOUT = float(os.environ.get("BH_IDLE_TIMEOUT", "900"))
 
 
 def log(msg):
@@ -187,6 +191,8 @@ class Daemon:
         self.events = deque(maxlen=BUF)
         self.dialog = None
         self.stop = None  # asyncio.Event, set inside start()
+        self.created = set()  # targetIds of tabs the harness opened (close on cleanup)
+        self.last_req = time.monotonic()  # bumped on every client request; drives idle shutdown
 
     async def attach_first_page(self):
         """Attach to a real page (or any page). Sets self.session. Returns attached target or None."""
@@ -196,6 +202,7 @@ class Daemon:
             # No real pages — create one instead of attaching to omnibox popup
             tid = (await self.cdp.send_raw("Target.createTarget", {"url": "about:blank"}))["targetId"]
             log(f"no real pages found, created about:blank ({tid})")
+            self.created.add(tid)
             pages = [{"targetId": tid, "url": "about:blank", "type": "page"}]
         self.session = (await self.cdp.send_raw(
             "Target.attachToTarget", {"targetId": pages[0]["targetId"], "flatten": True}
@@ -204,6 +211,18 @@ class Daemon:
         log(f"attached {pages[0]['targetId']} ({pages[0].get('url','')[:80]}) session={self.session}")
         await self._enable_default_domains(self.session)
         return pages[0]
+
+    async def close_created(self):
+        """Close every tab the harness opened. Best-effort: a tab the user already
+        closed, or a dead CDP link, just no-ops. User tabs are never in self.created."""
+        for tid in list(self.created):
+            try:
+                await asyncio.wait_for(
+                    self.cdp.send_raw("Target.closeTarget", {"targetId": tid}), timeout=2
+                )
+            except Exception as e:
+                log(f"close_created {tid}: {e}")
+        self.created.clear()
 
     async def _enable_default_domains(self, session_id):
         """Enable Page/DOM/Runtime/Network on a CDP session.
@@ -265,7 +284,12 @@ class Daemon:
         expected = ipc.expected_token()
         if expected is not None and req.get("token") != expected:
             return {"error": "unauthorized"}
+        self.last_req = time.monotonic()  # any client request resets the idle clock
         meta = req.get("meta")
+        if meta == "register_tab":
+            tid = req.get("target_id")
+            if tid: self.created.add(tid)
+            return {"ok": True}
         # Liveness probe — lets clients confirm the listener is actually this
         # daemon and not an unrelated process that reused our port post-crash.
         # `pid` lets restart_daemon() verify the live daemon's identity before
@@ -374,18 +398,36 @@ async def serve(d):
         finally:
             writer.close()
 
+    async def idle_watch():
+        # Poll last_req; set the stop event once the daemon has been quiet for
+        # IDLE_TIMEOUT. Sleeps in short slices so a fresh request is noticed
+        # promptly. Disabled when IDLE_TIMEOUT <= 0.
+        if IDLE_TIMEOUT <= 0:
+            await d.stop.wait()
+            return
+        while not d.stop.is_set():
+            await asyncio.sleep(min(30.0, IDLE_TIMEOUT))
+            if time.monotonic() - d.last_req >= IDLE_TIMEOUT:
+                log(f"idle {IDLE_TIMEOUT}s with no requests — shutting down")
+                d.stop.set()
+                return
+
     serve_task = asyncio.create_task(ipc.serve(NAME, handler))
     stop_task = asyncio.create_task(d.stop.wait())
+    idle_task = asyncio.create_task(idle_watch())
     await asyncio.sleep(0.05)  # let serve() bind so sock_addr() resolves to the live endpoint
     log(f"listening on {ipc.sock_addr(NAME)} (name={NAME}, remote={REMOTE_ID or 'local'})")
     try:
         await asyncio.wait({serve_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
         if serve_task.done(): await serve_task  # surfaces a serve crash
     finally:
-        for t in (serve_task, stop_task):
+        for t in (serve_task, stop_task, idle_task):
             t.cancel()
             try: await t
             except (asyncio.CancelledError, Exception): pass
+        # Close harness-opened tabs before we let go of the CDP link, so they
+        # don't linger in the user's Chrome and leak memory across sessions.
+        await _silent(d.close_created())
         ipc.cleanup_endpoint(NAME)
 
 
