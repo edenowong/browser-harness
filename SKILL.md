@@ -35,6 +35,18 @@ PY
 
 run.py calls ensure_daemon() before exec — you never start/stop manually unless you want to.
 
+### One daemon per BU_NAME (terminal isolation)
+
+The daemon is keyed by `BU_NAME` (default `default`). Every terminal sharing the default name shares one daemon — and therefore one tab-tracking set and one idle clock. Consequence: one terminal's `--reload` or idle-close will also close the *other* terminal's harness tabs, and either terminal's activity resets the shared idle timer.
+
+Locally the harness attaches to your already-running Chrome (it never launches its own), so a distinct `BU_NAME` gives a **separate daemon on the same browser** — separate tab-tracking, idle, and cleanup, but the same Chrome window. For a genuinely separate browser, use a remote daemon (below) or point `BU_CDP_URL` at a dedicated Chrome on its own port + `--user-data-dir`.
+
+To isolate cleanup per terminal, set a distinct name in each:
+
+```bash
+export BU_NAME=t1   # run once per terminal, before browser-harness calls
+```
+
 ### Remote browsers
 
 Use remote for parallel sub-agents (each gets its own isolated browser via a distinct BU_NAME) or on a headless server. BROWSER_USE_API_KEY must be set. start_remote_daemon, list_cloud_profiles, list_local_profiles, sync_local_profile are pre-imported.
