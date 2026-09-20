@@ -293,3 +293,72 @@ def test_current_tab_meta_returns_not_attached_when_no_target_id():
     assert result == {"error": "not_attached"}
     # No CDP call should have been issued.
     assert d.cdp.calls == []
+
+
+def test_created_tabs_meta_returns_empty_without_cdp_call_when_none_created():
+    """A watcher polls created_tabs every turn. With nothing opened by the
+    harness, the answer is known without asking Chrome."""
+    d = _fresh_daemon()
+
+    result = asyncio.run(d.handle({"meta": "created_tabs"}))
+
+    assert result == {"tabs": []}
+    assert d.cdp.calls == []
+
+
+def test_created_tabs_meta_reports_live_urls_and_prunes_closed_tabs():
+    """The point of the op: report only harness-opened tabs, with their current
+    url, never the user's own tabs. A harness tab the user closed by hand must
+    drop out, or the watcher's count drifts upward forever."""
+    class _TargetsCDP(_FakeCDP):
+        async def send_raw(self, method, params=None, session_id=None):
+            self.calls.append((method, params, session_id))
+            if method == "Target.getTargets":
+                return {"targetInfos": [
+                    {"targetId": "harness-1", "url": "https://example.com/?q=rice", "type": "page"},
+                    {"targetId": "user-gmail", "url": "https://mail.google.com/", "type": "page"},
+                ]}
+            return {}
+
+    d = daemon.Daemon()
+    d.cdp = _TargetsCDP()
+    d.created = {"harness-1", "harness-closed-by-user"}
+
+    result = asyncio.run(d.handle({"meta": "created_tabs"}))
+
+    assert result == {"tabs": [{"targetId": "harness-1", "url": "https://example.com/?q=rice"}]}
+    assert d.created == {"harness-1"}
+
+
+def test_created_tabs_meta_reports_stale_and_does_not_prune_on_cdp_error():
+    """A dead CDP link is not evidence a tab closed. Pruning here would make
+    close_created() forget tabs it still owns and leak them at shutdown."""
+    class _BrokenCDP(_FakeCDP):
+        async def send_raw(self, method, params=None, session_id=None):
+            raise ConnectionError("cdp gone")
+
+    d = daemon.Daemon()
+    d.cdp = _BrokenCDP()
+    d.created = {"harness-1", "harness-2"}
+
+    result = asyncio.run(d.handle({"meta": "created_tabs"}))
+
+    assert result == {
+        "tabs": [{"targetId": "harness-1", "url": ""}, {"targetId": "harness-2", "url": ""}],
+        "stale": True,
+    }
+    assert d.created == {"harness-1", "harness-2"}
+
+
+def test_created_tabs_meta_does_not_reset_idle_clock():
+    """The probe is polled every turn by an external watcher. If it counted as
+    activity, a busy session would never idle-close its harness tabs, which is
+    the leak the idle clock exists to prevent. Real requests still count."""
+    d = _fresh_daemon()
+    d.last_req = 100.0
+
+    asyncio.run(d.handle({"meta": "created_tabs"}))
+    assert d.last_req == 100.0
+
+    asyncio.run(d.handle({"meta": "register_tab", "target_id": "t1"}))
+    assert d.last_req != 100.0
