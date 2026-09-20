@@ -284,12 +284,39 @@ class Daemon:
         expected = ipc.expected_token()
         if expected is not None and req.get("token") != expected:
             return {"error": "unauthorized"}
-        self.last_req = time.monotonic()  # any client request resets the idle clock
         meta = req.get("meta")
+        # A monitoring probe is not activity. created_tabs is polled by an
+        # external watcher (the Dex Stop hook) once per turn; if that reset the
+        # idle clock, harness tabs would never idle-close on a busy session,
+        # which is the leak the clock exists to prevent.
+        if meta != "created_tabs":
+            self.last_req = time.monotonic()  # any client request resets the idle clock
         if meta == "register_tab":
             tid = req.get("target_id")
             if tid: self.created.add(tid)
             return {"ok": True}
+        if meta == "created_tabs":
+            # The daemon is the only thing that knows which tabs a harness run
+            # opened. /json/list is browser-wide, so a watcher using it cannot
+            # tell a leaked harness tab from the user's own Gmail — it reports
+            # everything, every turn, and gets ignored. This is the attribution
+            # that check actually needs.
+            if not self.created:
+                return {"tabs": []}
+            try:
+                targets = (await self.cdp.send_raw("Target.getTargets"))["targetInfos"]
+            except Exception:
+                # Could not look. Report the ids without urls rather than
+                # claiming nothing is open, and do NOT prune: a dead CDP link
+                # is not evidence that a tab closed.
+                return {"tabs": [{"targetId": t, "url": ""} for t in sorted(self.created)],
+                        "stale": True}
+            live = {t["targetId"]: t.get("url", "") for t in targets}
+            # A tab the user closed by hand otherwise sits in self.created until
+            # shutdown and inflates the count. An inflated number is its own
+            # credibility problem for a gate.
+            self.created &= set(live)
+            return {"tabs": [{"targetId": t, "url": live[t]} for t in sorted(self.created)]}
         # Liveness probe — lets clients confirm the listener is actually this
         # daemon and not an unrelated process that reused our port post-crash.
         # `pid` lets restart_daemon() verify the live daemon's identity before
